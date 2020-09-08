@@ -83,9 +83,9 @@ function sm2_pickUser() {
         }
     } else {
         if (g_singleUserGroup) {
-            query = `select id, cell_num from users where is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
+            query = `select id, cell_num from users where cohort_id = ${g_cohortId} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
         } else {
-            query = `select id, cell_num from users where group_num = ${g_group250Num} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
+            query = `select id, cell_num from users where cohort_id = ${g_cohortId} AND group_num = ${g_group250Num} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
         }
     }
     sqlConnection.query(query, function(error, results, fields) {
@@ -360,7 +360,6 @@ async function connectToWhatsApp() {
         await sendMessage()
         await sleep(g_sleepMs)
     }
-
 
 }
     
