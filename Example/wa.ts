@@ -42,6 +42,7 @@ let g_messageId: number
 
 function cleanupSendMessage() {
     console.log('FATAL: in cleanupSendMessage')
+    process.exit()
 }
 
 async function sendMessage() {
