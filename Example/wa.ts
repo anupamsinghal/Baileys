@@ -28,9 +28,15 @@ const g_cohortId: number = config.cohortId
 const g_processMax: number = config.processMax
 const g_sleepMs : number = config.sleepMs
 
-// simulation only - UNUSED
-const gs_groupId: number = config.groupId
-const gs_waGroupId: string = config.waGroupId
+// 9999 is for test
+const g_group250Num: number = config.group250Num
+const g_singleUserGroup: boolean = config.singleUserGroup
+const g_sendMessage: boolean = config.sendMessage
+
+// limit on how many groups can be created on single phone
+// switched to Josh3
+const g_groupId: number = config.groupId
+const g_waGroupId: string = config.waGroupId
 
 let g_messageId: number
 
@@ -39,6 +45,9 @@ function cleanupSendMessage() {
 }
 
 async function sendMessage() {
+    // if singleUserGroup = false, then we're NOT creating a new group. We're adding multiples to same group
+    // g_group250Num
+
     // 1 add message to messages table, if not already there
     // 2 pick user not in cohort already, add to user_cohort
     // 3 create WA group and add to grps table
@@ -66,9 +75,17 @@ function sm2_pickUser() {
     //console.log("in pickUser: ")
     let query
     if (g_simulation) {
-        query = `select id, cell_num from users where is_test = 1 limit 1`
+        if (g_singleUserGroup) {
+            query = `select id, cell_num from users where is_test = 1 limit 1`
+        } else {
+            query = `select id, cell_num from users where group_num = ${g_group250Num} AND exists_on_wa = 1 limit 1`
+        }
     } else {
-        query = `select id, cell_num from users where is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
+        if (g_singleUserGroup) {
+            query = `select id, cell_num from users where is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
+        } else {
+            query = `select id, cell_num from users where group_num = ${g_group250Num} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
+        }
     }
     sqlConnection.query(query, function(error, results, fields) {
         if (error) {
@@ -100,19 +117,40 @@ function sm22_userCohort(userId, cellNum) {
 async function sm3_createGroup(userId, cellNum) {
     //console.log('in createGroup: ', messageId, userId, cellNum)
 
-    // add the 3 users, 1 + 2 admins
-    let users = [cellNum]
-    users = users.concat(g_adminPhones)
-    users = users.map(user => convertPhoneToWAUserId(user))
     //console.log('creating group with users: ', users)
     
     // instead of creating a new one, first see if one already exists with the desired group name and users
     let group
-    // if (g_simulation) {
-    //     sm4_addUserGroups(userId, gs_waGroupId, gs_groupId)
-    //     return
-    // }
+
     //console.log('creating WA group')
+
+    let users = [cellNum]
+
+    if (!g_singleUserGroup) {
+        // reuse existing group
+        // add user to group
+        users = users.map(user => convertPhoneToWAUserId(user))
+
+        try {
+            //console.log("adding user to group")
+            const response = await waConnection.groupAdd(g_waGroupId, users)
+        } catch (err) {
+            console.log("FATAL: ", err)
+            process.exit()    
+        }
+        sm4_addUserGroups(userId, g_waGroupId, g_groupId)
+        return
+    }
+
+    if (g_simulation) {
+        sm4_addUserGroups(userId, g_waGroupId, g_groupId)
+        return
+    }
+
+    // add the 3 users, 1 + 2 admins
+    users = users.concat(g_adminPhones)
+    users = users.map(user => convertPhoneToWAUserId(user))
+    
     try {
         group = await waConnection.groupCreate(g_groupName, users)
     } catch (err) {        
@@ -163,8 +201,10 @@ function sm5_addUserMessages(userId, waGroupId, groupId) {
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        await waConnection.sendMessage(waGroupId, g_message, MessageType.text)
-        console.log('message sent')
+        if (g_sendMessage) {
+            await waConnection.sendMessage(waGroupId, g_message, MessageType.text)
+            console.log('message sent')
+        }
     });
 }
 
@@ -298,27 +338,31 @@ async function connectToWhatsApp() {
     const authInfo = waConnection.base64EncodedAuthInfo() // get all the auth info we need to restore this session
     fs.writeFileSync('./auth_info.json', JSON.stringify(authInfo, null, '\t')) // save this info to a file
 
+    console.log()
     if (g_simulation) {
-        console.log("*** Running in SIMULATION mode")        
+        console.log("*** Running in SIMULATION mode with loop value: ", g_processMax)        
     } else {
-        console.log("*** Running for REAL!")
+        console.log("*** Running for REAL with loop value: ", g_processMax)
     }
+    await sleep(2000)
 
     console.log ("oh hello " + waConnection.user.name + " (" + waConnection.user.jid + ")")
     console.log ("you have " + waConnection.chats.all().length + " chats")
     console.log()
 
-    // exists flow: determine max and loop
+    // 1 exists flow: determine max and loop
     // await e1_determineMaxAndLoop()
 
-    // message send flow
+    // 2 message send flow
     for (let i = 0; i < g_processMax; i++) {
         console.log('***', i+1, ' of ', g_processMax)
         await sendMessage()
         await sleep(g_sleepMs)
     }
 
+
 }
+    
 
 function updateMessageStatus(message) {
     // handle case where FROM is not from a group AND TO is to a group
@@ -381,7 +425,7 @@ function listen() {
 
     // no way to differentiate between user exiting themselves and admin removing them
     // we will assume user quit
-    // TODO: is user quit same as opt out? yes
+    // TODO: user STOP same as opt out
     waConnection.on ('group-participants-remove', (update) => {
         console.log ('jid: ', update.jid)
         console.log ('participants: ', update.participants)
