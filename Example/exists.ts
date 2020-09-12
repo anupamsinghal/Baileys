@@ -16,11 +16,7 @@ const config = require('../config.json')
 let sqlConnection
 const waConnection = new WAConnection() 
 
-// message send
-// settings moved to config.json
-
 const g_simulation: boolean = config.simulation
-const g_processMax: number = config.processMax
 const g_sleepMs : number = config.sleepMs
 
 function sleep(ms) {
@@ -116,7 +112,7 @@ async function e1_determineMaxAndLoop() {
         if (error) throw error;
         //console.log('Returning number: ', results[0].num);
         if (results.length > 0 && results[0].num > 0) {
-            let numToProcess = Math.min(results[0].num, g_processMax)
+            const numToProcess = results[0].num
             console.log('*** Processing rows = ', numToProcess)
 
             for (let i = 0; i < numToProcess; i++) {
@@ -124,11 +120,10 @@ async function e1_determineMaxAndLoop() {
                 e2_processExists()
                 await sleep(1000)
             }
-
             cleanup()
-
         } else {
-            console.log('ERROR: no rows found: ', results.length)
+            console.log('ERROR: no rows found.')
+            cleanup()
         }
     });
 }
@@ -155,9 +150,9 @@ async function connectToWhatsApp() {
 
     console.log()
     if (g_simulation) {
-        console.log("*** Running in SIMULATION mode with loop value: ", g_processMax)        
+        console.log("*** Running in SIMULATION mode")
     } else {
-        console.log("*** Running for REAL with loop value: ", g_processMax)
+        console.log("*** Running for REAL")
     }
     await sleep(g_sleepMs)
 
