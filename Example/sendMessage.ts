@@ -230,32 +230,6 @@ async function connectToDb() {
     await connectToWhatsApp().catch (err => console.log("unexpected error: " + err) ) // catch any errors
 }
 
-function cleanup() {
-    console.log('In cleanup')
-    sqlConnection.end(function(error) {
-        if (error)
-            console.log('FATAL ERROR closing mysql connection')
-    });
-}
-
-
-function e4_saveExists(phone, exists) {
-    //console.log('in saveExists: ', phone)
-    let query
-
-    if (exists) {
-        query = 'update users set exists_on_wa = 1, exists_on_wa_check_time = now() where cell_num = ?'
-    } else {
-        query = 'update users set exists_on_wa = 0, exists_on_wa_check_time = now() where cell_num = ?'
-    }
-
-    //console.log('query: ', query)
-    sqlConnection.query(query, [phone], function(error, results, fields) {
-        if (error) throw error;
-        console.log('changed ' + results.changedRows + ' rows');
-    });    
-}
-
 function convertPhoneToWAUserId(phone) {
     let newPhone = phone.replace('(', '').replace(')', '').replace(' ', '').replace('-', '')
     newPhone = '1' + newPhone
@@ -265,59 +239,6 @@ function convertPhoneToWAUserId(phone) {
     }
     return newPhone + '@s.whatsapp.net'
  }
-
-async function e3_validatePhone(phone) {
-    //console.log('In validatePhone: ', phone)
-    const newid = convertPhoneToWAUserId(phone)
-
-    //console.log('checking for: ', newid)
-    const exists = await waConnection.isOnWhatsApp (newid)
-    console.log (`${newid} ${exists ? " exists " : " does not exist"} on WhatsApp`)
-
-    // save result back in db
-    e4_saveExists(phone, exists)
-}
-
-
-// query db and get one phone number 
-function e2_processExists() {
-    // console.log('In processExists')
-
-    const query = 'select cell_num as num from users where exists_on_wa is null limit 1'
-    sqlConnection.query(query, function (error, results, fields) {
-        if (error) throw error;
-        //console.log('Returning number: ', results[0].num);
-        if (results.length > 0)
-            e3_validatePhone(results[0].num)
-        else {
-            console.log('ERROR: no rows found')
-        }
-    });
-}
-
-async function e1_determineMaxAndLoop() {
-    const query = 'select count(distinct(cell_num)) as num from users where exists_on_wa is null'
-
-    sqlConnection.query(query, async function(error, results, fields) {
-        if (error) throw error;
-        //console.log('Returning number: ', results[0].num);
-        if (results.length > 0 && results[0].num > 0) {
-            let numToProcess = Math.min(results[0].num, g_processMax)
-            console.log('*** Processing rows = ', numToProcess)
-
-            for (let i = 0; i < numToProcess; i++) {
-                console.log('***', i+1, ' of ', numToProcess)
-                e2_processExists()
-                await sleep(1000)
-            }
-
-            cleanup()
-
-        } else {
-            console.log('ERROR: no rows found: ', results.length)
-        }
-    });
-}
 
 async function connectToWhatsApp() {
     
@@ -351,10 +272,7 @@ async function connectToWhatsApp() {
     console.log ("you have " + waConnection.chats.all().length + " chats")
     console.log()
 
-    // 1 exists flow: determine max and loop
-    // await e1_determineMaxAndLoop()
-
-    // 2 message send flow
+    // message send flow
     for (let i = 0; i < g_processMax; i++) {
         console.log('***', i+1, ' of ', g_processMax)
         await sendMessage()

@@ -23,7 +23,8 @@
     "build:docs": "typedoc",
     "build:tsc": "tsc",
     "example": "npx ts-node Example/example.ts",
-    "wa": "npx ts-node Example/wa.ts",
+    "sm": "npx ts-node Example/sendMessage.ts",
+    "ex": "npx ts-node Example/exists.ts",
     "browser-decode": "npx ts-node src/BrowserMessageDecoding.ts"
   },
   "author": "Adhiraj Singh",
