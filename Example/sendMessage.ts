@@ -57,6 +57,7 @@ async function addToGroup() {
     // id & people to add to the group (will throw error if it fails)
     try {
 
+        console.log('in addToGroup, adding users: ', g_users)
         const response = await waConnection.groupAdd(g_waGroupId, g_users)
 
     } catch (err) {        
@@ -99,36 +100,6 @@ async function createGroup() { //userId, cellNum) {
         console.log("FATAL in createGroup: ", err)
         process.exit()
     }
-    
-
-/*
-    let users = [cellNum]
-    if (!g_singleUserGroup) {
-        // reuse existing group
-        // add user to group
-        users = users.map(user => convertPhoneToWAUserId(user))
-
-        try {
-            //console.log("adding user to group")
-            const response = await waConnection.groupAdd(g_waGroupId, users)
-        } catch (err) {
-            console.log("FATAL: ", err)
-            process.exit()    
-        }
-        sm4_addUserGroups(userId, g_waGroupId, g_groupId)
-        return
-    }
-
-    if (g_simulation) {
-        sm4_addUserGroups(userId, g_waGroupId, g_groupId)
-        return
-    }
-
-    // add the 3 users, 1 + 2 admins
-    users = users.concat(g_adminPhones)
-    users = users.map(user => convertPhoneToWAUserId(user))
-    //console.log('created WA group')
-    */
 }
 
 async function sendMessage() {
@@ -138,6 +109,7 @@ async function sendMessage() {
 
     try {
 
+        console.log('sending message')
         await waConnection.sendMessage(g_waGroupId, g_message, MessageType.text)
         console.log('message sent')
 
@@ -148,11 +120,9 @@ async function sendMessage() {
 }
 
 function prepAddToGroup() {
-    // if singleUserGroup = false, then we're NOT creating a new group. We're adding multiples to same group
-    // g_group250Num
-
     // 1 add message to messages table, if not already there
-    // 2 pick user not in cohort already, add to user_cohort
+    // 2 pick user not in cohort already
+    // 3 add to user_cohort
     // 4 add user to user_group table
     // 5 add to user_message table
 
