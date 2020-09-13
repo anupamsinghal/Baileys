@@ -67,7 +67,7 @@ function e4_saveExists(phone, exists) {
 }
 
 function convertPhoneToWAUserId(phone) {
-    let newPhone = phone.replace('(', '').replace(')', '').replace(' ', '').replace('-', '')
+    let newPhone = phone.replace('(', '').replace(')', '').replace(/\ /g, '').replace(/\-/g, '').replace(/\./g, '')
     newPhone = '1' + newPhone
     if (newPhone.length != 11) {
         console.log('ERROR: bad phone: ', newPhone)

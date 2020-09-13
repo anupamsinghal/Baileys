@@ -8,6 +8,7 @@ import {
     MessageLogLevel,
     WA_MESSAGE_STUB_TYPES,
     ReconnectMode,
+    GroupSettingChange,
 } from '../src/WAConnection/WAConnection'
 import * as fs from 'fs'
 
@@ -19,10 +20,14 @@ const waConnection = new WAConnection()
 // message send
 // settings moved to config.json
 
+// in simulation, use is_test users, ignore g_processMax
 const g_simulation: boolean = config.simulation
+
+const g_createGroup: boolean = config.createGroup
+
 const g_message: string = config.message
-const g_adminIds = config.adminIds
-const g_adminPhones = config.adminPhones   // TODO, remove this, read from db
+const g_adminIds: number[] = config.adminIds
+const g_adminPhones: string[] = config.adminPhones   // TODO, remove this, read from db
 const g_groupName: string = config.groupName
 const g_cohortId: number = config.cohortId
 const g_processMax: number = config.processMax
@@ -35,98 +40,69 @@ const g_sendMessage: boolean = config.sendMessage
 
 // limit on how many groups can be created on single phone
 // switched to Josh3
-const g_groupId: number = config.groupId
-const g_waGroupId: string = config.waGroupId
+let g_groupId: number = config.groupId
+let g_waGroupId: string = config.waGroupId
 
 let g_messageId: number
+let g_me: string
+let g_users: string[] = []
 
 function cleanupSendMessage() {
     console.log('FATAL: in cleanupSendMessage')
     process.exit()
 }
 
-async function sendMessage() {
-    // if singleUserGroup = false, then we're NOT creating a new group. We're adding multiples to same group
-    // g_group250Num
+// in one shot, unlike the painful approach earlier
+async function addToGroup() {
+    // id & people to add to the group (will throw error if it fails)
+    try {
 
-    // 1 add message to messages table, if not already there
-    // 2 pick user not in cohort already, add to user_cohort
-    // 3 create WA group and add to grps table
-    // 4 add user to user_group table
-    // 5 add to user_message table
-    // 6 send message
-    // 7 update user_message
+        const response = await waConnection.groupAdd(g_waGroupId, g_users)
 
-    // handle the fact that phone numbers are not unique: made users.cell_num unique
-    // TODO: run for 2 users
-
-    const query = `insert ignore into messages (content, cohort_id) values ("${g_message}", ${g_cohortId})`
-    sqlConnection.query(query, function(error, results, fields) {
-        if (error) {
-            cleanupSendMessage()
-            throw error;
-        }
-        //console.log('affected ' + results.affectedRows + ' rows');
-        g_messageId = results.insertId
-        sm2_pickUser()
-    });    
-}
-
-function sm2_pickUser() {
-    //console.log("in pickUser: ")
-    let query
-    if (g_simulation) {
-        if (g_singleUserGroup) {
-            query = `select id, cell_num from users where is_test = 1 limit 1`
-        } else {
-            query = `select id, cell_num from users where group_num = ${g_group250Num} AND exists_on_wa = 1 limit 1`
-        }
-    } else {
-        if (g_singleUserGroup) {
-            query = `select id, cell_num from users where cohort_id = ${g_cohortId} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
-        } else {
-            query = `select id, cell_num from users where cohort_id = ${g_cohortId} AND group_num = ${g_group250Num} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
-        }
+    } catch (err) {        
+        console.log("FATAL in addToGroup: ", err)
+        process.exit()
     }
-    sqlConnection.query(query, function(error, results, fields) {
-        if (error) {
-            cleanupSendMessage()
-            throw error;
-        }
-        if (results.length > 0) {
-            console.log(`picked user with id = ${results[0].id} and phone = ${results[0].cell_num}`)
-            sm22_userCohort(results[0].id, results[0].cell_num)
-        } else {
-            console.log('ERROR in pickUser: no rows found')
-            cleanupSendMessage()
-        }
-    });
-}
+ }
 
-function sm22_userCohort(userId, cellNum) {
-    const query = `insert ignore into user_cohort (user_id, cohort_id) values (${userId}, ${g_cohortId})`
-    sqlConnection.query(query, function(error, results, fields) {
-        if (error) {
-            cleanupSendMessage()
-            throw error;
-        }
-        //console.log('affected ' + results.affectedRows + ' rows');
-        sm3_createGroup(userId, cellNum)
-    });
-}
 
-async function sm3_createGroup(userId, cellNum) {
-    //console.log('in createGroup: ', messageId, userId, cellNum)
+async function createGroup() { //userId, cellNum) {    
+    if (!g_createGroup) { 
+        return
+    }
 
-    //console.log('creating group with users: ', users)
+    try {
+        console.log("creating group")
+        let admins = g_adminPhones
+        admins = admins.map(admin => convertPhoneToWAUserId(admin))
+        let group = await waConnection.groupCreate(g_groupName, admins)
+        console.log("created group")
+        g_waGroupId = group.gid
+
+        await waConnection.groupMakeAdmin(g_waGroupId, admins)
+        // only allow admins to send messages
+        await waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.messageSend, true)
+        // only allow admins to modify the group's settings
+        await waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.settingsChange, true)
+
+        const query = "insert ignore into `groups` (name, wa_id) values (?, ?)"
+        sqlConnection.query(query, [g_groupName, g_waGroupId], function(error, results, fields) {
+            if (error) {
+                cleanupSendMessage()
+                throw error;
+            }
+            //console.log('affected ' + results.affectedRows + ' rows');
+            g_groupId = results.insertId
+            // sm4_addUserGroups(userId, group.gid, )
+        });
+    } catch (err) {        
+        console.log("FATAL in createGroup: ", err)
+        process.exit()
+    }
     
-    // instead of creating a new one, first see if one already exists with the desired group name and users
-    let group
 
-    //console.log('creating WA group')
-
+/*
     let users = [cellNum]
-
     if (!g_singleUserGroup) {
         // reuse existing group
         // add user to group
@@ -151,30 +127,98 @@ async function sm3_createGroup(userId, cellNum) {
     // add the 3 users, 1 + 2 admins
     users = users.concat(g_adminPhones)
     users = users.map(user => convertPhoneToWAUserId(user))
-    
-    try {
-        group = await waConnection.groupCreate(g_groupName, users)
-    } catch (err) {        
-        console.log("FATAL: ", err)
-        process.exit()
-    }
     //console.log('created WA group')
-    const query = "insert ignore into `groups` (name, wa_id) values (?, ?)"
-    sqlConnection.query(query, [g_groupName, group.gid], function(error, results, fields) {
+    */
+}
+
+async function sendMessage() {
+    if (!g_sendMessage) {
+        return
+    }
+
+    try {
+
+        await waConnection.sendMessage(g_waGroupId, g_message, MessageType.text)
+        console.log('message sent')
+
+    } catch (err) {        
+        console.log("FATAL in sendMessage: ", err)
+        process.exit()
+    }    
+}
+
+function prepAddToGroup() {
+    // if singleUserGroup = false, then we're NOT creating a new group. We're adding multiples to same group
+    // g_group250Num
+
+    // 1 add message to messages table, if not already there
+    // 2 pick user not in cohort already, add to user_cohort
+    // 4 add user to user_group table
+    // 5 add to user_message table
+
+    const query = `insert ignore into messages (content, cohort_id) values ("${g_message}", ${g_cohortId})`
+    sqlConnection.query(query, function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        sm4_addUserGroups(userId, group.gid, results.insertId)
+        g_messageId = results.insertId
+        sm2_pickUser()
+    });    
+}
+
+function sm2_pickUser() {
+    //console.log("in pickUser: ")
+    let query
+    if (g_simulation) {
+        if (g_singleUserGroup) {
+            query = `select id, cell_num from users where is_test = 1 limit 1`
+        } else {
+            query = `select id, cell_num from users where is_test = 1 limit 1`
+            // query = `select id, cell_num from users where group_num = ${g_group250Num} AND exists_on_wa = 1 limit 1`
+        }
+    } else {
+        if (g_singleUserGroup) {
+            query = `select id, cell_num from users where cohort_id = ${g_cohortId} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
+        } else {
+            query = `select id, cell_num from users where cohort_id = ${g_cohortId} AND group_num = ${g_group250Num} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
+        }
+    }
+    sqlConnection.query(query, function(error, results, fields) {
+        if (error) {
+            cleanupSendMessage()
+            throw error;
+        }
+        if (results.length > 0) {
+            console.log(`picked user with id = ${results[0].id} and phone = ${results[0].cell_num}`)
+            g_users.push(convertPhoneToWAUserId(results[0].cell_num))
+            sm3_userCohort(results[0].id)
+        } else {
+            console.log('ERROR in pickUser: no rows found')
+            cleanupSendMessage()
+        }
     });
 }
 
-function sm4_addUserGroups(userId, waGroupId, groupId) {
+function sm3_userCohort(userId: number) {
+    const query = `insert ignore into user_cohort (user_id, cohort_id) values (${userId}, ${g_cohortId})`
+    sqlConnection.query(query, function(error, results, fields) {
+        if (error) {
+            cleanupSendMessage()
+            throw error;
+        }
+        //console.log('affected ' + results.affectedRows + ' rows');
+        sm4_addUserGroups(userId)
+    });
+}
+
+
+function sm4_addUserGroups(userId: number) {
     //console.log('in sm4_addUserGroups: ', waGroupId, groupId)
 
-    let query = `insert ignore into user_group (user_id, group_id) values (${userId}, ${groupId})`
-    g_adminIds.forEach(adminId => query += `, (${adminId}, ${groupId})`)
+    let query = `insert ignore into user_group (user_id, group_id) values (${userId}, ${g_groupId})`
+    //g_adminIds.forEach(adminId => query += `, (${adminId}, ${g_groupId})`)
     //console.log(query)
     sqlConnection.query(query, function(error, results, fields) {
         if (error) {
@@ -182,18 +226,18 @@ function sm4_addUserGroups(userId, waGroupId, groupId) {
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        sm5_addUserMessages(userId, waGroupId, groupId)
+        sm5_addUserMessages(userId)
     });
 }
 
 // for simulation, this won't update cos unique key is (user_id, message_id)
-function sm5_addUserMessages(userId, waGroupId, groupId) {
+function sm5_addUserMessages(userId) {
     //console.log('in addUserMessage', userId, messageId)
     let query
     if (g_messageId == 0) {
-        query = `insert ignore into user_message (sent_time, user_id, group_id, message_id) values (now(), ${userId}, ${groupId}, (select id from messages where content = "${g_message}" and cohort_id = ${g_cohortId})) on duplicate key update sent_time = now()`
+        query = `insert ignore into user_message (sent_time, user_id, group_id, message_id) values (now(), ${userId}, ${g_groupId}, (select id from messages where content = "${g_message}" and cohort_id = ${g_cohortId})) on duplicate key update sent_time = now()`
     } else {
-        query = `insert ignore into user_message (sent_time, user_id, message_id, group_id) values (now(), ${userId}, ${g_messageId}, ${groupId}) on duplicate key update sent_time = now()`
+        query = `insert ignore into user_message (sent_time, user_id, message_id, group_id) values (now(), ${userId}, ${g_messageId}, ${g_groupId}) on duplicate key update sent_time = now()`
     }
     //console.log(query)
     sqlConnection.query(query, async function(error, results, fields) {
@@ -202,10 +246,6 @@ function sm5_addUserMessages(userId, waGroupId, groupId) {
             throw error;
         }
         //console.log('affected ' + results.affectedRows + ' rows');
-        if (g_sendMessage) {
-            await waConnection.sendMessage(waGroupId, g_message, MessageType.text)
-            console.log('message sent')
-        }
     });
 }
 
@@ -231,7 +271,7 @@ async function connectToDb() {
 }
 
 function convertPhoneToWAUserId(phone) {
-    let newPhone = phone.replace('(', '').replace(')', '').replace(' ', '').replace('-', '')
+    let newPhone = phone.replace('(', '').replace(')', '').replace(/\ /g, '').replace(/\-/g, '').replace(/\./g, '')
     newPhone = '1' + newPhone
     if (newPhone.length != 11) {
         console.log('ERROR: bad phone: ', newPhone)
@@ -266,21 +306,30 @@ async function connectToWhatsApp() {
     } else {
         console.log("*** Running for REAL with loop value: ", g_processMax)
     }
-    await sleep(2000)
+    await sleep(3000)
 
-    console.log ("oh hello " + waConnection.user.name + " (" + waConnection.user.jid + ")")
+    g_me = waConnection.user.jid
+    console.log ("oh hello " + waConnection.user.name + " (" +  g_me + ")")
     console.log ("you have " + waConnection.chats.all().length + " chats")
     console.log()
 
     // message send flow
+
+    // create or reuse group
+    createGroup()
+
+    // pick users
+    let users: string[] = []
     for (let i = 0; i < g_processMax; i++) {
         console.log('***', i+1, ' of ', g_processMax)
-        await sendMessage()
+        prepAddToGroup()
         await sleep(g_sleepMs)
     }
-
+    // add to group and send message
+    await addToGroup()
+    await sendMessage()
 }
-    
+
 
 function updateMessageStatus(message) {
     // handle case where FROM is not from a group AND TO is to a group
