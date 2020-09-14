@@ -43,8 +43,7 @@ const g_group250Num: number = config.group250Num
 const g_singleUserGroup: boolean = config.singleUserGroup
 const g_sendMessage: boolean = config.sendMessage
 
-// limit on how many groups can be created on single phone
-// switched to Josh3
+// if createGroup is false, this gets used
 let g_groupId: number = config.groupId
 let g_waGroupId: string = config.waGroupId
 
