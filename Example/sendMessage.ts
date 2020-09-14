@@ -14,8 +14,9 @@ import * as fs from 'fs'
 
 const mysql = require('mysql');
 const config = require('../config.json')
-let sqlConnection
-const waConnection = new WAConnection() 
+
+let g_sqlConnection
+const g_waConnection = new WAConnection() 
 
 // message send
 // settings moved to config.json
@@ -58,7 +59,7 @@ async function addToGroup() {
     try {
 
         console.log('in addToGroup, adding users: ', g_users)
-        const response = await waConnection.groupAdd(g_waGroupId, g_users)
+        const response = await g_waConnection.groupAdd(g_waGroupId, g_users)
 
     } catch (err) {        
         console.log("FATAL in addToGroup: ", err)
@@ -76,18 +77,18 @@ async function createGroup() { //userId, cellNum) {
         console.log("creating group")
         let admins = g_adminPhones
         admins = admins.map(admin => convertPhoneToWAUserId(admin))
-        let group = await waConnection.groupCreate(g_groupName, admins)
+        let group = await g_waConnection.groupCreate(g_groupName, admins)
         console.log("created group")
         g_waGroupId = group.gid
 
-        await waConnection.groupMakeAdmin(g_waGroupId, admins)
+        await g_waConnection.groupMakeAdmin(g_waGroupId, admins)
         // only allow admins to send messages
-        await waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.messageSend, true)
+        await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.messageSend, true)
         // only allow admins to modify the group's settings
-        await waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.settingsChange, true)
+        await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.settingsChange, true)
 
         const query = "insert ignore into `groups` (name, wa_id) values (?, ?)"
-        sqlConnection.query(query, [g_groupName, g_waGroupId], function(error, results, fields) {
+        g_sqlConnection.query(query, [g_groupName, g_waGroupId], function(error, results, fields) {
             if (error) {
                 cleanupSendMessage()
                 throw error;
@@ -110,7 +111,7 @@ async function sendMessage() {
     try {
 
         console.log('sending message')
-        await waConnection.sendMessage(g_waGroupId, g_message, MessageType.text)
+        await g_waConnection.sendMessage(g_waGroupId, g_message, MessageType.text)
         console.log('message sent')
 
     } catch (err) {        
@@ -127,7 +128,7 @@ function prepAddToGroup() {
     // 5 add to user_message table
 
     const query = `insert ignore into messages (content, cohort_id) values ("${g_message}", ${g_cohortId})`
-    sqlConnection.query(query, function(error, results, fields) {
+    g_sqlConnection.query(query, function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
@@ -155,7 +156,7 @@ function sm2_pickUser() {
             query = `select id, cell_num from users where cohort_id = ${g_cohortId} AND group_num = ${g_group250Num} AND is_admin = 0 AND optout_time is null AND exists_on_wa = 1 AND id not in (select user_id from user_cohort where cohort_id = ${g_cohortId}) limit 1`
         }
     }
-    sqlConnection.query(query, function(error, results, fields) {
+    g_sqlConnection.query(query, function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
@@ -173,7 +174,7 @@ function sm2_pickUser() {
 
 function sm3_userCohort(userId: number) {
     const query = `insert ignore into user_cohort (user_id, cohort_id) values (${userId}, ${g_cohortId})`
-    sqlConnection.query(query, function(error, results, fields) {
+    g_sqlConnection.query(query, function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
@@ -190,7 +191,7 @@ function sm4_addUserGroups(userId: number) {
     let query = `insert ignore into user_group (user_id, group_id) values (${userId}, ${g_groupId})`
     //g_adminIds.forEach(adminId => query += `, (${adminId}, ${g_groupId})`)
     //console.log(query)
-    sqlConnection.query(query, function(error, results, fields) {
+    g_sqlConnection.query(query, function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
@@ -210,7 +211,7 @@ function sm5_addUserMessages(userId) {
         query = `insert ignore into user_message (sent_time, user_id, message_id, group_id) values (now(), ${userId}, ${g_messageId}, ${g_groupId}) on duplicate key update sent_time = now()`
     }
     //console.log(query)
-    sqlConnection.query(query, async function(error, results, fields) {
+    g_sqlConnection.query(query, async function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
@@ -224,18 +225,18 @@ function sleep(ms) {
 }
 
 async function connectToDb() {
-    sqlConnection = mysql.createConnection({
+    g_sqlConnection = mysql.createConnection({
         host     : config.host,
         user     : config.user,
         password : config.password,
         database : config.database
     });
-    sqlConnection.connect(function(err) {
+    g_sqlConnection.connect(function(err) {
         if (err) {
             console.error('error connecting: ' + err.stack);
             return;
         }
-        console.log('connected as id ' + sqlConnection.threadId);
+        console.log('connected as id ' + g_sqlConnection.threadId);
     });
     await connectToWhatsApp().catch (err => console.log("unexpected error: " + err) ) // catch any errors
 }
@@ -253,11 +254,11 @@ function convertPhoneToWAUserId(phone) {
 async function connectToWhatsApp() {
     
     //console.log('1')
-    waConnection.autoReconnect = ReconnectMode.onConnectionLost // only automatically reconnect when the connection breaks
-    waConnection.logLevel = MessageLogLevel.info // set to unhandled to see what kind of stuff you can implement
+    g_waConnection.autoReconnect = ReconnectMode.onConnectionLost // only automatically reconnect when the connection breaks
+    g_waConnection.logLevel = MessageLogLevel.info // set to unhandled to see what kind of stuff you can implement
 
     // loads the auth file credentials if present
-    fs.existsSync('./auth_info.json') && waConnection.loadAuthInfo ('./auth_info.json')
+    fs.existsSync('./auth_info.json') && g_waConnection.loadAuthInfo ('./auth_info.json')
     
     /* Called when contacts are received, 
      * do note, that this method may be called before the connection is done completely because WA is funny sometimes 
@@ -265,9 +266,9 @@ async function connectToWhatsApp() {
     //waConnection.on ('contacts-received', contacts => console.log(`received ${Object.keys(contacts).length} contacts`))
     
     // connect or timeout in 60 seconds
-    await waConnection.connect()
+    await g_waConnection.connect()
 
-    const authInfo = waConnection.base64EncodedAuthInfo() // get all the auth info we need to restore this session
+    const authInfo = g_waConnection.base64EncodedAuthInfo() // get all the auth info we need to restore this session
     fs.writeFileSync('./auth_info.json', JSON.stringify(authInfo, null, '\t')) // save this info to a file
 
     console.log()
@@ -278,9 +279,9 @@ async function connectToWhatsApp() {
     }
     await sleep(3000)
 
-    g_me = waConnection.user.jid
-    console.log ("oh hello " + waConnection.user.name + " (" +  g_me + ")")
-    console.log ("you have " + waConnection.chats.all().length + " chats")
+    g_me = g_waConnection.user.jid
+    console.log ("oh hello " + g_waConnection.user.name + " (" +  g_me + ")")
+    console.log ("you have " + g_waConnection.chats.all().length + " chats")
     console.log()
 
     // message send flow
@@ -327,7 +328,7 @@ function updateMessageStatus(message) {
             query = `update user_message set ${field} = now() where message_id = ${g_messageId} AND user_id in (select id from users where normalized_cell = "${user}")`
         }    
         //console.log(query)
-        sqlConnection.query(query, function(error, results, fields) {
+        g_sqlConnection.query(query, function(error, results, fields) {
             if (error) {
                 cleanupSendMessage()
                 throw error;
@@ -343,7 +344,7 @@ function optoutUser(user) {
     user = user.replace('@s.whatsapp.net', '').substr(1)
     console.log("opting out: ", user)
     const query = `update users set optout_time = now() where normalized_cell = "${user}"`
-    sqlConnection.query(query, function(error, results, fields) {
+    g_sqlConnection.query(query, function(error, results, fields) {
         if (error) {
             cleanupSendMessage()
             throw error;
@@ -353,7 +354,7 @@ function optoutUser(user) {
 }
 
 function listen() {
-    waConnection.on('message-status-update', (message) => {
+    g_waConnection.on('message-status-update', (message) => {
         //console.log ('from: ', message.from)
         //console.log ('to: ', message.to, message.ids)
         //console.log ('type: ', message.type, message.participant)
@@ -363,7 +364,7 @@ function listen() {
     // no way to differentiate between user exiting themselves and admin removing them
     // we will assume user quit
     // TODO: user STOP same as opt out
-    waConnection.on ('group-participants-remove', (update) => {
+    g_waConnection.on ('group-participants-remove', (update) => {
         console.log ('jid: ', update.jid)
         console.log ('participants: ', update.participants)
 
