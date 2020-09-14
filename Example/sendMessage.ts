@@ -29,6 +29,10 @@ const g_createGroup: boolean = config.createGroup
 const g_message: string = config.message
 const g_adminIds: number[] = config.adminIds
 const g_adminPhones: string[] = config.adminPhones   // TODO, remove this, read from db
+
+const g_simUserIds: number[] = config.simUserIds
+const g_simUserPhones: string[] = config.simUserPhones
+
 const g_groupName: string = config.groupName
 const g_cohortId: number = config.cohortId
 const g_processMax: number = config.processMax
@@ -48,8 +52,9 @@ let g_messageId: number
 let g_me: string
 let g_users: string[] = []
 
-function cleanupSendMessage() {
+async function cleanupSendMessage() {
     console.log('FATAL: in cleanupSendMessage')
+    await rollback()
     process.exit()
 }
 
@@ -63,7 +68,8 @@ async function addToGroup() {
 
     } catch (err) {        
         console.log("FATAL in addToGroup: ", err)
-        process.exit()
+        cleanupSendMessage()
+        throw err
     }
  }
 
@@ -99,7 +105,8 @@ async function createGroup() { //userId, cellNum) {
         });
     } catch (err) {        
         console.log("FATAL in createGroup: ", err)
-        process.exit()
+        cleanupSendMessage()
+        throw err
     }
 }
 
@@ -116,11 +123,12 @@ async function sendMessage() {
 
     } catch (err) {        
         console.log("FATAL in sendMessage: ", err)
-        process.exit()
+        cleanupSendMessage()
+        throw err
     }    
 }
 
-function prepAddToGroup() {
+function prepAddToGroup(counter: number) {
     // 1 add message to messages table, if not already there
     // 2 pick user not in cohort already
     // 3 add to user_cohort
@@ -135,11 +143,11 @@ function prepAddToGroup() {
         }
         //console.log('affected ' + results.affectedRows + ' rows');
         g_messageId = results.insertId
-        sm2_pickUser()
+        sm2_pickUser(counter)
     });    
 }
 
-function sm2_pickUser() {
+function sm2_pickUser(counter: number) {
     //console.log("in pickUser: ")
     let query
     if (g_simulation) {
@@ -161,7 +169,11 @@ function sm2_pickUser() {
             cleanupSendMessage()
             throw error;
         }
-        if (results.length > 0) {
+        if (g_simulation) {
+            console.log(`picked user with id = ${g_simUserIds[counter]} and phone = ${g_simUserPhones[counter]}`)
+            g_users.push(convertPhoneToWAUserId(g_simUserPhones[counter]))
+            sm3_userCohort(g_simUserIds[counter])
+        } else if (results.length > 0) {
             console.log(`picked user with id = ${results[0].id} and phone = ${results[0].cell_num}`)
             g_users.push(convertPhoneToWAUserId(results[0].cell_num))
             sm3_userCohort(results[0].id)
@@ -179,7 +191,7 @@ function sm3_userCohort(userId: number) {
             cleanupSendMessage()
             throw error;
         }
-        //console.log('affected ' + results.affectedRows + ' rows');
+        console.log('user_cohort affected ' + results.affectedRows + ' rows');
         sm4_addUserGroups(userId)
     });
 }
@@ -196,7 +208,7 @@ function sm4_addUserGroups(userId: number) {
             cleanupSendMessage()
             throw error;
         }
-        //console.log('affected ' + results.affectedRows + ' rows');
+        console.log('user_group affected ' + results.affectedRows + ' rows');
         sm5_addUserMessages(userId)
     });
 }
@@ -216,12 +228,36 @@ function sm5_addUserMessages(userId) {
             cleanupSendMessage()
             throw error;
         }
-        //console.log('affected ' + results.affectedRows + ' rows');
+        console.log('user_message affected ' + results.affectedRows + ' rows');
     });
 }
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function beginTransaction() {
+    g_sqlConnection.beginTransaction(function(err) {
+        if (err) { throw err; }
+        console.log("BEGIN transacation.")
+    })
+    await sleep(500)
+}
+
+async function rollback() {
+    g_sqlConnection.rollback(function(err) {
+        if (err) { throw err; }
+        console.log("ROLLING back transacation.")
+    })
+    await sleep(1000)
+}
+
+async function commit() {
+    g_sqlConnection.commit(function(err) {
+        if (err) { throw err; }
+        console.log("COMMITTING transacation.")
+    })
+    await sleep(2000)
 }
 
 async function connectToDb() {
@@ -236,7 +272,7 @@ async function connectToDb() {
             console.error('error connecting: ' + err.stack);
             return;
         }
-        console.log('connected as id ' + g_sqlConnection.threadId);
+        //console.log('connected as id ' + g_sqlConnection.threadId);
     });
     await connectToWhatsApp().catch (err => console.log("unexpected error: " + err) ) // catch any errors
 }
@@ -250,57 +286,6 @@ function convertPhoneToWAUserId(phone) {
     }
     return newPhone + '@s.whatsapp.net'
  }
-
-async function connectToWhatsApp() {
-    
-    //console.log('1')
-    g_waConnection.autoReconnect = ReconnectMode.onConnectionLost // only automatically reconnect when the connection breaks
-    g_waConnection.logLevel = MessageLogLevel.info // set to unhandled to see what kind of stuff you can implement
-
-    // loads the auth file credentials if present
-    fs.existsSync('./auth_info.json') && g_waConnection.loadAuthInfo ('./auth_info.json')
-    
-    /* Called when contacts are received, 
-     * do note, that this method may be called before the connection is done completely because WA is funny sometimes 
-     * */
-    //waConnection.on ('contacts-received', contacts => console.log(`received ${Object.keys(contacts).length} contacts`))
-    
-    // connect or timeout in 60 seconds
-    await g_waConnection.connect()
-
-    const authInfo = g_waConnection.base64EncodedAuthInfo() // get all the auth info we need to restore this session
-    fs.writeFileSync('./auth_info.json', JSON.stringify(authInfo, null, '\t')) // save this info to a file
-
-    console.log()
-    if (g_simulation) {
-        console.log("*** Running in SIMULATION mode with loop value: ", g_processMax)        
-    } else {
-        console.log("*** Running for REAL with loop value: ", g_processMax)
-    }
-    await sleep(3000)
-
-    g_me = g_waConnection.user.jid
-    console.log ("oh hello " + g_waConnection.user.name + " (" +  g_me + ")")
-    console.log ("you have " + g_waConnection.chats.all().length + " chats")
-    console.log()
-
-    // message send flow
-
-    // create or reuse group
-    createGroup()
-
-    // pick users
-    let users: string[] = []
-    for (let i = 0; i < g_processMax; i++) {
-        console.log('***', i+1, ' of ', g_processMax)
-        prepAddToGroup()
-        await sleep(g_sleepMs)
-    }
-    // add to group and send message
-    await addToGroup()
-    await sendMessage()
-}
-
 
 function updateMessageStatus(message) {
     // handle case where FROM is not from a group AND TO is to a group
@@ -376,6 +361,61 @@ function listen() {
     })
 }
 
+async function connectToWhatsApp() {
+    
+    //console.log('1')
+    g_waConnection.autoReconnect = ReconnectMode.onConnectionLost // only automatically reconnect when the connection breaks
+    g_waConnection.logLevel = MessageLogLevel.info // set to unhandled to see what kind of stuff you can implement
+
+    // loads the auth file credentials if present
+    fs.existsSync('./auth_info.json') && g_waConnection.loadAuthInfo ('./auth_info.json')
+    
+    /* Called when contacts are received, 
+     * do note, that this method may be called before the connection is done completely because WA is funny sometimes 
+     * */
+    //waConnection.on ('contacts-received', contacts => console.log(`received ${Object.keys(contacts).length} contacts`))
+    
+    // connect or timeout in 60 seconds
+    await g_waConnection.connect()
+
+    const authInfo = g_waConnection.base64EncodedAuthInfo() // get all the auth info we need to restore this session
+    fs.writeFileSync('./auth_info.json', JSON.stringify(authInfo, null, '\t')) // save this info to a file
+
+    console.log()
+    if (g_simulation) {
+        console.log("*** Running in SIMULATION mode with loop value: ", g_processMax)        
+    } else {
+        console.log("*** Running for REAL with loop value: ", g_processMax)
+    }
+    await sleep(3000)
+
+    g_me = g_waConnection.user.jid
+    console.log ("oh hello " + g_waConnection.user.name + " (" +  g_me + ")")
+    console.log ("you have " + g_waConnection.chats.all().length + " chats")
+    console.log()
+
+    // message send flow
+
+    beginTransaction()
+    
+    // create or reuse group
+    createGroup()
+
+    // pick users
+    let users: string[] = []
+    for (let i = 0; i < g_processMax; i++) {
+        console.log('***', i+1, ' of ', g_processMax)
+        prepAddToGroup(i)
+        await sleep(g_sleepMs)
+    }
+    // add to group and send message
+    await addToGroup()
+    await sendMessage()
+    commit()
+}
+
+
 listen()
 // run in main file
 connectToDb() //.catch (err => console.log("unexpected error: " + err) ) // catch any errors
+
