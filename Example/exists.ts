@@ -118,7 +118,7 @@ async function e1_determineMaxAndLoop() {
             for (let i = 0; i < numToProcess; i++) {
                 console.log('***', i + 1, ' of ', numToProcess)
                 e2_processExists()
-                await sleep(1000)
+                await sleep(g_sleepMs)
             }
             cleanup()
         } else {
@@ -154,7 +154,7 @@ async function connectToWhatsApp() {
     } else {
         console.log("*** Running for REAL")
     }
-    await sleep(g_sleepMs)
+    await sleep(3000)
 
     console.log ("oh hello " + waConnection.user.name + " (" + waConnection.user.jid + ")")
     console.log ("you have " + waConnection.chats.all().length + " chats")
