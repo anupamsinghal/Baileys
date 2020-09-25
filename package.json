@@ -23,12 +23,9 @@
     "build:docs": "typedoc",
     "build:tsc": "tsc",
     "example": "npx ts-node Example/example.ts",
-<<<<<<< HEAD
     "sm": "npx ts-node Example/sendMessage.ts",
     "ex": "npx ts-node Example/exists.ts",
-=======
     "gen-protobuf": "ts-node src/Binary/GenerateStatics.ts",
->>>>>>> 18cea74aaf3e74477bf2091ee9649f75a0af9c50
     "browser-decode": "npx ts-node src/BrowserMessageDecoding.ts"
   },
   "author": "Adhiraj Singh",
