@@ -7,6 +7,7 @@ import {
     WAFlag,
 } from '../WAConnection/Constants'
 import { generateProfilePicture, waChatUniqueKey, whatsappID, unixTimestampSeconds } from './Utils'
+import { Mutex } from './Mutex'
 
 // All user related functions -- get profile picture, set status etc.
 
@@ -95,12 +96,11 @@ export class WAConnection extends Base {
      * @param searchString optionally search for users
      * @returns the chats & the cursor to fetch the next page
      */
-    async loadChats (count: number, before: number | null, searchString?: string) {
-        let db = this.chats
-        if (searchString) {
-            db = db.filter (value => value.name?.includes (searchString) || value.jid?.startsWith(searchString))
-        }
-        const chats = db.paginated (before, count)
+    async loadChats (count: number, before: number | null, filters?: {searchString?: string, custom?: (c: WAChat) => boolean}) {
+        const chats = this.chats.paginated (before, count, filters && (chat => (
+            (typeof filters?.custom !== 'function' || filters?.custom(chat)) &&
+            (typeof filters?.searchString === 'undefined' || chat.name?.includes (filters.searchString) || chat.jid?.startsWith(filters.searchString))
+        )))
         await Promise.all (
             chats.map (async chat => (
                 chat.imgUrl === undefined && await this.setProfilePicture (chat)
@@ -109,6 +109,12 @@ export class WAConnection extends Base {
         const cursor = (chats[chats.length-1] && chats.length >= count) ? waChatUniqueKey (chats[chats.length-1]) : null
         return { chats, cursor }
     }
+    /**
+     * Update the profile picture
+     * @param jid 
+     * @param img 
+     */
+    @Mutex (jid => jid)
     async updateProfilePicture (jid: string, img: Buffer) {
         jid = whatsappID (jid)
         const data = await generateProfilePicture (img)
@@ -134,6 +140,7 @@ export class WAConnection extends Base {
      * @param jid the ID of the person/group you are modifiying
      * @param durationMs only for muting, how long to mute the chat for
      */
+    @Mutex ((jid, type) => jid+type)
     async modifyChat (jid: string, type: ChatModification, durationMs?: number) {
         jid = whatsappID (jid)
         const chat = this.assertChatGet (jid)

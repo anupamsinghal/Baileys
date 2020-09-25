@@ -1,6 +1,6 @@
 import * as QR from 'qrcode-terminal'
 import { WAConnection as Base } from './3.Connect'
-import { WAMessageStatusUpdate, WAMessage, WAContact, WAChat, WAMessageProto, WA_MESSAGE_STUB_TYPE, WA_MESSAGE_STATUS_TYPE, MessageLogLevel, PresenceUpdate, BaileysEvent, DisconnectReason, WANode, WAOpenResult } from './Constants'
+import { WAMessageStatusUpdate, WAMessage, WAContact, WAChat, WAMessageProto, WA_MESSAGE_STUB_TYPE, WA_MESSAGE_STATUS_TYPE, MessageLogLevel, PresenceUpdate, BaileysEvent, DisconnectReason, WANode, WAOpenResult, Presence } from './Constants'
 import { whatsappID, unixTimestampSeconds, isGroupID, toNumber } from './Utils'
 
 export class WAConnection extends Base {
@@ -10,12 +10,31 @@ export class WAConnection extends Base {
         // new messages
         this.registerCallback(['action', 'add:relay', 'message'], json => {
             const message = json[2][0][2] as WAMessage
+            const jid = whatsappID( message.key.remoteJid )
+            if (jid.endsWith('@s.whatsapp.net')) {
+                const contact = this.contacts[jid]
+                if (contact && contact?.lastKnownPresence === Presence.composing) {
+                    contact.lastKnownPresence = Presence.available
+                }
+            }
             this.chatAddMessageAppropriate (message)
         })
         // presence updates
-        this.registerCallback('Presence', json => (
-            this.emit('user-presence-update', json[1] as PresenceUpdate)
-        ))
+        this.registerCallback('Presence', json => {
+            const update = json[1] as PresenceUpdate
+            
+            const jid = whatsappID(update.id)
+            const contact = this.contacts[jid]
+            if (contact && jid.endsWith('@s.whatsapp.net')) { // if its a single chat
+                if (update.t) contact.lastSeen = +update.t
+                else if (update.type === Presence.unavailable && contact.lastKnownPresence !== Presence.unavailable) {
+                    contact.lastSeen = unixTimestampSeconds()
+                }
+                contact.lastKnownPresence = update.type
+            }
+
+            this.emit('user-presence-update', update)
+        })
         // If a message has been updated (usually called when a video message gets its upload url)
         this.registerCallback (['action', 'add:update', 'message'], json => {
             const message: WAMessage = json[2][0][2]
@@ -251,7 +270,12 @@ export class WAConnection extends Base {
                         break
                     case WA_MESSAGE_STUB_TYPE.GROUP_PARTICIPANT_ADD:
                     case WA_MESSAGE_STUB_TYPE.GROUP_PARTICIPANT_INVITE:
+                    case WA_MESSAGE_STUB_TYPE.GROUP_PARTICIPANT_ADD_REQUEST_JOIN:
                         participants = message.messageStubParameters.map (whatsappID)
+                        if (participants.includes(this.user.jid) && chat.read_only === 'true') {
+                            delete chat.read_only
+                            this.emit ('chat-update', { jid, read_only: 'false' })
+                        }
                         this.emit ('group-participants-add', { jid, participants, actor })
                         break
                     case WA_MESSAGE_STUB_TYPE.GROUP_CHANGE_ANNOUNCE:
@@ -276,7 +300,7 @@ export class WAConnection extends Base {
     }
     protected chatUpdatedMessage (messageIDs: string[], status: WA_MESSAGE_STATUS_TYPE, chat: WAChat) {
         for (let msg of chat.messages) {
-            if (messageIDs.includes(msg.key.id)) {
+            if (messageIDs.includes(msg.key.id) && msg.status < status) {
                 if (status <= WA_MESSAGE_STATUS_TYPE.PENDING) msg.status = status
                 else if (isGroupID(chat.jid)) msg.status = status-1
                 else msg.status = status
@@ -297,6 +321,8 @@ export class WAConnection extends Base {
     on (event: 'connecting', listener: () => void): this
     /** when the connection has closed */
     on (event: 'close', listener: (err: {reason?: DisconnectReason | string, isReconnecting: boolean}) => void): this
+    /** when the connection has closed */
+    on (event: 'intermediate-close', listener: (err: {reason?: DisconnectReason | string}) => void): this
     /** when a new QR is generated, ready for scanning */
     on (event: 'qr', listener: (qr: string) => void): this
     /** when the connection to the phone changes */

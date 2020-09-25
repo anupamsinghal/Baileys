@@ -35,19 +35,20 @@ export class WAConnection extends Base {
 
                 const loggedOut = error instanceof BaileysError && UNAUTHORIZED_CODES.includes(error.status)
                 const willReconnect = !loggedOut && (tries <= (options?.maxRetries || 5)) && this.state === 'connecting'
+                const reason = loggedOut ? DisconnectReason.invalidSession : error.message
 
                 this.log (`connect attempt ${tries} failed: ${error}${ willReconnect ? ', retrying...' : ''}`, MessageLogLevel.info)
 
                 if ((this.state as string) !== 'close' && !willReconnect) {
-                    this.closeInternal (loggedOut ? DisconnectReason.invalidSession : error.message)
+                    this.closeInternal (reason)
                 }
-
                 if (!willReconnect) throw error
+                this.emit ('intermediate-close', {reason})
             }
         }
 
         const updatedChats = !!this.lastDisconnectTime && updates
-        const result: WAOpenResult = { newConnection, updatedChats }
+        const result: WAOpenResult = { user: this.user, newConnection, updatedChats }
         this.emit ('open', result)
  
         this.releasePendingRequests ()
@@ -64,7 +65,15 @@ export class WAConnection extends Base {
         // actual connect
         const connect = () => {
             const timeoutMs = options?.timeoutMs || 60*1000
-            let task = Utils.promiseTimeout(timeoutMs, (resolve, reject) => {
+            
+            let cancel: () => void
+            const task = Utils.promiseTimeout(timeoutMs, (resolve, reject) => {
+                cancel = () => reject (CancelledError())
+                const checkIdleTime = () => {
+                    this.debounceTimeout && clearTimeout (this.debounceTimeout)
+                    this.debounceTimeout = setTimeout (() => rejectSafe (TimedOutError()), this.connectOptions.maxIdleTimeMs)
+                }
+                const debouncedTimeout = () => this.connectOptions.maxIdleTimeMs && this.conn.addEventListener ('message', checkIdleTime)
                 // determine whether reconnect should be used or not
                 const shouldUseReconnect = this.lastDisconnectReason !== DisconnectReason.replaced && 
                                             this.lastDisconnectReason !== DisconnectReason.unknown &&
@@ -73,35 +82,51 @@ export class WAConnection extends Base {
                 
                 const reconnectID = shouldUseReconnect ? this.user.jid.replace ('@s.whatsapp.net', '@c.us') : null
 
-                this.conn = new WS(WS_URL, null, { origin: DEFAULT_ORIGIN, timeout: timeoutMs, agent: options.agent })
-                this.conn.on('message', data => this.onMessageRecieved(data as any))
-
-                this.conn.on ('open', () => {
-                    this.log(`connected to WhatsApp Web server, authenticating via ${reconnectID ? 'reconnect' : 'takeover'}`, MessageLogLevel.info)
-                    
-                    this.authenticate(reconnectID)
-                    .then (resolve)
-                    .then (() => (
-                        this.conn
-                        .removeAllListeners ('error')
-                        .removeAllListeners ('close')
-                    ))
-                    .catch (reject)
+                this.conn = new WS(WS_URL, null, { 
+                    origin: DEFAULT_ORIGIN, 
+                    timeout: this.connectOptions.maxIdleTimeMs, 
+                    agent: options.agent,
+                    headers: {
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Cache-Control': 'no-cache',
+                        'Host': 'web.whatsapp.com',
+                        'Pragma': 'no-cache',
+                        'Sec-WebSocket-Extensions': 'permessage-deflate; client_max_window_bits',
+                    }
                 })
-                this.conn.on('error', reject)
-                this.conn.on('close', () => reject(new Error('close')))
-            })
+                this.conn.addEventListener('message', ({data}) => this.onMessageRecieved(data as any))
+                
+                this.conn.on ('open', async () => {
+                    this.log(`connected to WhatsApp Web server, authenticating via ${reconnectID ? 'reconnect' : 'takeover'}`, MessageLogLevel.info)
+                    let waitForChats: Promise<{[k: string]: Partial<WAChat>}>
+                    // add wait for chats promise if required
+                    if (typeof options?.waitForChats === 'undefined' ? true : options?.waitForChats) {
+                        const recv = this.receiveChatsAndContacts(this.connectOptions.waitOnlyForLastMessage)
+                        waitForChats = recv.waitForChats
+                        cancel = () => {
+                            reject (CancelledError())
+                            recv.cancelChats ()
+                        }
+                    }
+                    try {
+                        await this.authenticate (debouncedTimeout, reconnectID)
+                        this.conn
+                            .removeAllListeners ('error')
+                            .removeAllListeners ('close')
+                        const result = waitForChats && (await waitForChats)
+                        this.conn.removeEventListener ('message', checkIdleTime)
+                        resolve (result)
+                    } catch (error) {
+                        reject (error)
+                    }
+                })
+                const rejectSafe = error => reject (error)
+                this.conn.on('error', rejectSafe)
+                this.conn.on('close', () => rejectSafe(new Error('close')))
+            }) as Promise<void | { [k: string]: Partial<WAChat> }>
 
-            let cancel: () => void
-            if (typeof options?.waitForChats === 'undefined' ? true : options?.waitForChats) {
-                const {waitForChats, cancelChats} = this.receiveChatsAndContacts()
-                task = Promise.all ([task, waitForChats]).then (([_, updates]) => updates)
-                cancel = cancelChats
-            }
-            
-            task = task as Promise<void | { [k: string]: Partial<WAChat> }>
-
-            return { promise: task, cancel }
+            return { promise: task, cancel: cancel }
         }
 
         let promise = Promise.resolve ()
@@ -123,7 +148,7 @@ export class WAConnection extends Base {
             const result = connect ()
             cancellations.push (result.cancel)
 
-            const final = await result.promise
+            const final = await result.promise            
             return final
         } catch (error) {
             this.endConnection ()
@@ -136,9 +161,8 @@ export class WAConnection extends Base {
     /**
      * Sets up callbacks to receive chats, contacts & messages.
      * Must be called immediately after connect
-     * @returns [chats, contacts]
      */
-    protected receiveChatsAndContacts() {
+    protected receiveChatsAndContacts(waitOnlyForLast: boolean) {
         const chats = new KeyedDB<WAChat>(Utils.waChatUniqueKey, c => c.jid)
         const contacts = {}
 
@@ -149,9 +173,11 @@ export class WAConnection extends Base {
         const deregisterCallbacks = () => {
             // wait for actual messages to load, "last" is the most recent message, "before" contains prior messages
             this.deregisterCallback(['action', 'add:last'])
-            this.deregisterCallback(['action', 'add:before'])
-            this.deregisterCallback(['action', 'add:unread'])
-
+            if (!waitOnlyForLast) {
+                this.deregisterCallback(['action', 'add:before'])
+                this.deregisterCallback(['action', 'add:unread'])    
+            }
+            
             this.deregisterCallback(['response', 'type:chat'])
             this.deregisterCallback(['response', 'type:contacts'])
         }
@@ -161,7 +187,7 @@ export class WAConnection extends Base {
         const chatUpdate = json => {
             receivedMessages = true
 
-            const isLast = json[1].last
+            const isLast = json[1].last || waitOnlyForLast
             const messages = json[2] as WANode[]
 
             if (messages) {
@@ -234,7 +260,7 @@ export class WAConnection extends Base {
                 const oldChats = this.chats
                 const updatedChats: { [k: string]: Partial<WAChat> } = {}
 
-                for (let chat of chats.all()) {
+                chats.all().forEach (chat => {
                     const respectiveContact = contacts[chat.jid]
                     chat.name = respectiveContact?.name || respectiveContact?.notify || chat.name
                     
@@ -246,8 +272,8 @@ export class WAConnection extends Base {
                         delete changes.messages
                         updatedChats[chat.jid] = changes
                     }
-                }
-
+                })
+                
                 this.chats = chats 
                 this.contacts = contacts
 
@@ -274,6 +300,10 @@ export class WAConnection extends Base {
 
             if (this.logLevel === MessageLogLevel.all) {
                 this.log(messageTag + ', ' + JSON.stringify(json), MessageLogLevel.all)
+            }
+            if (!this.phoneConnected) {
+                this.phoneConnected = true
+                this.emit ('connection-phone-change', { connected: true })
             }
             /*
              Check if this is a response to a message we sent
@@ -340,7 +370,7 @@ export class WAConnection extends Base {
 
             // poll phone connection as well, 
             // 5000 ms for timeout
-            this.checkPhoneConnection (5000) 
+            this.checkPhoneConnection (this.connectOptions.phoneResponseTime || 7500) 
             .then (connected => {
                 this.phoneConnected !== connected && this.emit ('connection-phone-change', {connected})
                 this.phoneConnected = connected

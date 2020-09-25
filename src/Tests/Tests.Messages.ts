@@ -18,11 +18,11 @@ WAConnectionTest('Messages', conn => {
         assert.equal (content?.contextInfo?.isForwarded, true)
     })
     it('should send a link preview', async () => {
-        const content = await conn.generateLinkPreview ('hello this is from https://www.github.com/adiwajshing/Baileys')
-        const message = await sendAndRetreiveMessage(conn, content, MessageType.text)
+        const text = 'hello this is from https://www.github.com/adiwajshing/Baileys'
+        const message = await sendAndRetreiveMessage(conn, text, MessageType.text, { detectLinks: true })
         const received = message.message.extendedTextMessage
         
-        assert.strictEqual(received.text, content.text)
+        assert.strictEqual(received.text, text)
         assert.ok (received.canonicalUrl)
         assert.ok (received.title)
         assert.ok (received.description)
@@ -39,6 +39,13 @@ WAConnectionTest('Messages', conn => {
             quoted.key.fromMe ? conn.user.jid : quoted.key.id
         )
     })
+    it('should upload media successfully', async () => {
+        const content = await fs.readFile('./Media/sonata.mp3')
+        // run 10 uploads
+        for (let i = 0; i < 10;i++) {
+            await conn.prepareMessageContent (content, MessageType.audio, { filename: 'audio.mp3', mimetype: Mimetype.mp4Audio })
+        }
+    })
     it('should send a gif', async () => {
         const content = await fs.readFile('./Media/ma_gif.mp4')
         const message = await sendAndRetreiveMessage(conn, content, MessageType.video, { mimetype: Mimetype.gif })
@@ -51,20 +58,67 @@ WAConnectionTest('Messages', conn => {
         
         await conn.downloadAndSaveMediaMessage(message,'./Media/received_aud')
     })
+    it('should send an audio as a voice note', async () => {
+        const content = await fs.readFile('./Media/sonata.mp3')
+        const message = await sendAndRetreiveMessage(conn, content, MessageType.audio, { mimetype: Mimetype.ogg, ptt: true })
+        
+        assert.equal (message.message?.audioMessage?.ptt, true)
+        await conn.downloadAndSaveMediaMessage(message,'./Media/received_aud')
+    })
     it('should send an image', async () => {
         const content = await fs.readFile('./Media/meme.jpeg')
         const message = await sendAndRetreiveMessage(conn, content, MessageType.image)
         
         await conn.downloadMediaMessage(message)
-        //const message2 = await sendAndRetreiveMessage (conn, 'this is a quote', MessageType.extendedText)
     })
     it('should send a sticker', async () => {
         const content = await fs.readFile('./Media/octopus.webp')
         const message = await sendAndRetreiveMessage(conn, content, MessageType.sticker)
         
         await conn.downloadMediaMessage(message)
-        //const message2 = await sendAndRetreiveMessage (conn, 'this is a quote', MessageType.extendedText)
     })
+    /*it('should send an interactive message', async () => {
+        
+        console.log (
+            JSON.stringify(await conn.loadMessages (testJid, 5), null, '\t')
+        )
+        const message = conn.prepareMessageFromContent (
+            testJid,
+            {
+                templateMessage: {
+                    fourRowTemplate: {
+                        content: {
+                            namespace: 'my-namespace',
+                            localizableParams: [
+                                
+                            ],
+                            params: ['hello!']
+                        },
+                        buttons: [
+                            {
+                                index: 0,
+                                quickReplyButton: {
+                                    displayText: {
+                                        params: ['my name jeff']
+                                    }
+                                }
+                            },
+                            {
+                                index: 1,
+                                quickReplyButton: {
+                                    displayText: {
+                                        params: ['my name NOT jeff'],
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            {}
+        )
+        await conn.relayWAMessage (message)
+    })*/
     it('should send an image & quote', async () => {
         const quoted = (await conn.loadMessages(testJid, 2)).messages[0]
         const content = await fs.readFile('./Media/meme.jpeg')
@@ -98,12 +152,21 @@ WAConnectionTest('Messages', conn => {
         const JID = '1234-1234@g.us'
         conn.sendMessage(JID, 'hello', MessageType.text)
 
-        conn.on ('message-status-update', update => {
+        conn.on ('message-status-update', async update => {
             if (update.to === JID) {
                 assert.equal (update.type, WA_MESSAGE_STATUS_TYPE.ERROR)
+                await conn.deleteChat (JID)
                 done ()
             }
         })
+    })
+    it('should not duplicate messages', async () => {
+        const results = await Promise.all ([
+            conn.loadMessages (testJid, 50),
+            conn.loadMessages (testJid, 50)
+        ])
+        assert.deepEqual (results[0].messages, results[1].messages)
+        assert.ok (results[0].messages.length <= 50)
     })
     it('should deliver a message', async () => {
         const waitForUpdate = 

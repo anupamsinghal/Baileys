@@ -26,10 +26,11 @@ import {
 } from './Constants'
 import { EventEmitter } from 'events'
 import KeyedDB from '@adiwajshing/keyed-db'
+import { STATUS_CODES, Agent } from 'http'
 
 export class WAConnection extends EventEmitter {
     /** The version of WhatsApp Web we're telling the servers we are */
-    version: [number, number, number] = [2, 2033, 7]
+    version: [number, number, number] = [2, 2037, 6]
     /** The Browser we're telling the WhatsApp Web servers we are */
     browserDescription: [string, string, string] = Utils.Browsers.baileys ('Chrome')
     /** Metadata like WhatsApp id, name set on WhatsApp etc. */
@@ -44,16 +45,19 @@ export class WAConnection extends EventEmitter {
     regenerateQRIntervalMs = 30*1000
     connectOptions: WAConnectOptions = {
         timeoutMs: 60*1000,
+        maxIdleTimeMs: 10*1000,
+        waitOnlyForLastMessage: false,
         waitForChats: true,
         maxRetries: 5,
-        connectCooldownMs: 2250
+        connectCooldownMs: 2250,
+        phoneResponseTime: 7500
     }
     /** When to auto-reconnect */
     autoReconnect = ReconnectMode.onConnectionLost 
     /** Whether the phone is connected */
     phoneConnected: boolean = false
 
-    maxCachedMessages = 25
+    maxCachedMessages = 50
 
     chats: KeyedDB<WAChat> = new KeyedDB (Utils.waChatUniqueKey, value => value.jid)
     contacts: { [k: string]: WAContact } = {}
@@ -78,6 +82,7 @@ export class WAConnection extends EventEmitter {
     protected lastDisconnectReason: DisconnectReason 
 
     protected mediaConn: MediaConnInfo
+    protected debounceTimeout: NodeJS.Timeout
 
     constructor () {
         super ()
@@ -99,7 +104,10 @@ export class WAConnection extends EventEmitter {
             error !== DisconnectReason.invalidSession // do not reconnect if credentials have been invalidated
         
         this.closeInternal(error, willReconnect)
-        willReconnect && this.connect ()
+        willReconnect && (
+            this.connect ()
+            .catch(err => {}) // prevent unhandled exeception
+        ) 
     }
     /**
      * base 64 encode the authentication credentials and return them
@@ -224,12 +232,12 @@ export class WAConnection extends EventEmitter {
      * @param tag the tag to attach to the message
      * recieved JSON
      */
-    async query({json, binaryTags, tag, timeoutMs, expect200, waitForOpen}: WAQuery) {
+    async query({json, binaryTags, tag, timeoutMs, expect200, waitForOpen, longTag}: WAQuery) {
         waitForOpen = typeof waitForOpen === 'undefined' ? true : waitForOpen
         if (waitForOpen) await this.waitForConnection ()
         
-        if (binaryTags) tag = await this.sendBinary(json as WANode, binaryTags, tag)
-        else tag = await this.sendJSON(json, tag)
+        if (binaryTags) tag = await this.sendBinary(json as WANode, binaryTags, tag, longTag)
+        else tag = await this.sendJSON(json, tag, longTag)
        
         const response = await this.waitForMessage(tag, json, timeoutMs)
         if (expect200 && response.status && Math.floor(+response.status / 100) !== 2) {
@@ -239,7 +247,11 @@ export class WAConnection extends EventEmitter {
                 const response = await this.query ({json, binaryTags, tag, timeoutMs, expect200, waitForOpen})
                 return response
             }
-            throw new BaileysError(`Unexpected status code in '${json[0] || 'generic query'}': ${response.status}`, {query: json, status: response.status})
+            const message = STATUS_CODES[response.status] || 'unknown'
+            throw new BaileysError(
+                `Unexpected status in '${json[0] || 'generic query'}': ${STATUS_CODES[response.status]}(${response.status})`, 
+                {query: json, message, status: response.status}
+            )
         }
         return response
     }
@@ -250,12 +262,12 @@ export class WAConnection extends EventEmitter {
      * @param tag the tag to attach to the message
      * @return the message tag
      */
-    protected sendBinary(json: WANode, tags: WATag, tag: string = null) {
+    protected sendBinary(json: WANode, tags: WATag, tag: string = null, longTag: boolean = false) {
         const binary = this.encoder.write(json) // encode the JSON to the WhatsApp binary format
 
         let buff = Utils.aesEncrypt(binary, this.authInfo.encKey) // encrypt it using AES and our encKey
         const sign = Utils.hmacSign(buff, this.authInfo.macKey) // sign the message using HMAC and our macKey
-        tag = tag || this.generateMessageTag()
+        tag = tag || this.generateMessageTag(longTag)
         buff = Buffer.concat([
             Buffer.from(tag + ','), // generate & prefix the message tag
             Buffer.from(tags), // prefix some bytes that tell whatsapp what the message is about
@@ -271,8 +283,8 @@ export class WAConnection extends EventEmitter {
      * @param tag the tag to attach to the message
      * @return the message tag
      */
-    protected sendJSON(json: any[] | WANode, tag: string = null) {
-        tag = tag || this.generateMessageTag()
+    protected sendJSON(json: any[] | WANode, tag: string = null, longTag: boolean = false) {
+        tag = tag || this.generateMessageTag(longTag)
         this.send(`${tag},${JSON.stringify(json)}`)
         return tag
     }
@@ -310,6 +322,7 @@ export class WAConnection extends EventEmitter {
 
         this.qrTimeout && clearTimeout (this.qrTimeout)
         this.keepAliveReq && clearInterval(this.keepAliveReq)
+        this.debounceTimeout && clearTimeout (this.debounceTimeout)
         
         this.state = 'close'
         this.msgCount = 0
@@ -328,6 +341,8 @@ export class WAConnection extends EventEmitter {
     }
     protected endConnection () {
         this.conn?.removeAllListeners ('close')
+        this.conn?.removeAllListeners ('error')
+        this.conn?.removeAllListeners ('open')
         this.conn?.removeAllListeners ('message')
         //this.conn?.close ()
         this.conn?.terminate()
@@ -345,16 +360,17 @@ export class WAConnection extends EventEmitter {
     /**
      * Does a fetch request with the configuration of the connection
      */
-    protected fetchRequest = (endpoint: string, method: string = 'GET', body?: any) => (
+    protected fetchRequest = (endpoint: string, method: string = 'GET', body?: any, agent?: Agent, headers?: {[k: string]: string}) => (
         fetch(endpoint, {
             method,
             body,
-            headers: { Origin: DEFAULT_ORIGIN },
-            agent: this.connectOptions.agent
+            headers: { Origin: DEFAULT_ORIGIN, ...(headers || {}) },
+            agent: agent || this.connectOptions.agent
         })
     )
-    generateMessageTag () {
-        return `${Utils.unixTimestampSeconds(this.referenceDate)}.--${this.msgCount}`
+    generateMessageTag (longTag: boolean = false) {
+        const seconds = Utils.unixTimestampSeconds(this.referenceDate)
+        return `${longTag ? seconds : (seconds%1000)}.--${this.msgCount}`
     }
     protected log(text, level: MessageLogLevel) {
         (this.logLevel >= level) && console.log(`[Baileys][${new Date().toLocaleString()}] ${text}`)

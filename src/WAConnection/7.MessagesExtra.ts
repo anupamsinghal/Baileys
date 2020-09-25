@@ -1,16 +1,11 @@
 import {WAConnection as Base} from './6.MessagesSend'
-import {
-    MessageType,
-    WAMessageKey,
-    MessageInfo,
-    WATextMessage,
-    WAUrlInfo,
-    WAMessageContent, WAMetric, WAFlag, WANode, WAMessage, WAMessageProto, BaileysError, MessageLogLevel, WA_MESSAGE_STATUS_TYPE
-} from './Constants'
+import { MessageType, WAMessageKey, MessageInfo, WAMessageContent, WAMetric, WAFlag, WANode, WAMessage, WAMessageProto } from './Constants'
 import { whatsappID, delay, toNumber, unixTimestampSeconds } from './Utils'
+import { Mutex } from './Mutex'
 
 export class WAConnection extends Base {
 
+    @Mutex ()
     async loadAllUnreadMessages () {
         const tasks = this.chats.all()
                     .filter(chat => chat.count > 0)
@@ -20,12 +15,12 @@ export class WAConnection extends Base {
         list.forEach (({messages}) => combined.push(...messages))
         return combined
     }
-
     /** Get the message info, who has read it, who its been delivered to */
+    @Mutex ((jid, messageID) => jid+messageID)
     async messageInfo (jid: string, messageID: string) {
         const query = ['query', {type: 'message_info', index: messageID, jid: jid, epoch: this.msgCount.toString()}, null]
         const response = (await this.query ({json: query, binaryTags: [22, WAFlag.ignore], expect200: true}))[2]
-        
+
         const info: MessageInfo = {reads: [], deliveries: []}
         if (response) {
             //console.log (response)
@@ -45,50 +40,32 @@ export class WAConnection extends Base {
      * @param jid the ID of the person/group whose message you want to mark read
      * @param unread unreads the chat, if true
      */
+    @Mutex (jid => jid)
     async chatRead (jid: string, type: 'unread' | 'read' = 'read') {
         jid = whatsappID (jid)
         const chat = this.assertChatGet (jid)
 
         if (type === 'unread') await this.sendReadReceipt (jid, null, -2)
         else if (chat.count !== 0) {
-            let messageID: string
-            
-            let messages: WAMessage[]
-            let cursor: any
-
-            messages = chat.messages
-            cursor = messages[messages.length-1]?.key
-
-            do {
-                const m = messages.reverse().find (m => !m.key.fromMe)
-                if (m) messageID = m.key.id
-
-                const obj = await this.loadMessages (jid, 10, cursor)
-                messages = obj.messages
-                cursor = obj.cursor
-
-                if (messages.length === 0) throw new BaileysError ('no valid message found to read', { status: 404 })
-            } while (!messageID)
-
-            await this.sendReadReceipt (jid, messageID, Math.abs(chat.count))
+            const {messages} = await this.loadMessages (jid, 1)
+            await this.sendReadReceipt (jid, messages[0].key, Math.abs(chat.count))
         }
-
         chat.count = type === 'unread' ? -1 : 0
         this.emit ('chat-update', {jid, count: chat.count})
     }
     /**
-     * Sends a read receipt for a given message; 
+     * Sends a read receipt for a given message;
      * does not update the chat do @see chatRead
      * @param jid the ID of the person/group whose message you want to mark read
-     * @param messageID optionally, the message ID
+     * @param messageKey the key of the message
      * @param count number of messages to read, set to < 0 to unread a message
      */
-    async sendReadReceipt(jid: string, messageID: string, count: number) {
+    async sendReadReceipt(jid: string, messageKey: { id?: string, fromMe?: boolean }, count: number) {
         const attributes = {
-            jid: jid, 
-            count: count.toString(), 
-            index: messageID, 
-            owner: messageID ? 'false' : null
+            jid: jid,
+            count: count.toString(),
+            index: messageKey?.id,
+            owner: messageKey?.fromMe?.toString()
         }
         const read = await this.setQuery ([['read', attributes, null]])
         return read
@@ -99,6 +76,7 @@ export class WAConnection extends Base {
      * @param before the data for which message to offset the query by
      * @param mostRecentFirst retreive the most recent message first or retreive from the converation start
      */
+    @Mutex ((jid, _, before, mostRecentFirst) => jid + (before?.id || '') + mostRecentFirst)
     async loadMessages (
         jid: string,
         count: number,
@@ -125,16 +103,18 @@ export class WAConnection extends Base {
             return (response[2] as WANode[])?.map(item => item[2] as WAMessage) || []
         }
         const chat = this.chats.get (jid)
-        
         let messages: WAMessage[]
         if (!before && chat && mostRecentFirst) {
             messages = chat.messages
-            if (messages.length < count) {
-                const extra = await retreive (count-messages.length, messages[0]?.key)
-                messages.unshift (...extra) 
+            const diff = count - messages.length
+            if (diff < 0) {
+                messages = messages.slice(-count); // get the last X messages
+            } else if (diff > 0) {
+                const extra = await retreive (diff, messages[0]?.key)
+                messages.unshift (...extra)
             }
         } else messages = await retreive (count, before)
-        
+
         let cursor
         if (messages[0]) cursor = { id: messages[0].key.id, fromMe: messages[0].key.fromMe }
         return {messages, cursor}
@@ -197,10 +177,10 @@ export class WAConnection extends Base {
     /**
      * Loads all messages sent after a specific date
      */
-    async messagesReceivedAfter (date: Date) {
+    async messagesReceivedAfter (date: Date, onlyUnrespondedMessages = false) {
         const stamp = unixTimestampSeconds (date)
         // find the index where the chat timestamp becomes greater
-        const idx = this.chats.all ().findIndex (c => c.t < stamp) 
+        const idx = this.chats.all ().findIndex (c => c.t < stamp)
         // all chats before that index -- i.e. all chats that were updated after that
         const chats = this.chats.all ().slice (0, idx)
 
@@ -208,7 +188,7 @@ export class WAConnection extends Base {
         await Promise.all (
             chats.map (async chat => {
                 await this.findMessage (chat.jid, 5, m => {
-                    if (toNumber(m.messageTimestamp) < stamp) return true 
+                    if (toNumber(m.messageTimestamp) < stamp || (onlyUnrespondedMessages && m.key.fromMe)) return true
                     messages.push (m)
                 })
             })
@@ -224,35 +204,18 @@ export class WAConnection extends Base {
         const actual = await this.loadMessages (jid, 1, messages[0] && messages[0].key, false)
         return actual.messages[0]
     }
-    /** Query a string to check if it has a url, if it does, return required extended text message */
-    async generateLinkPreview (text: string) {
-        const query = ['query', {type: 'url', url: text, epoch: this.msgCount.toString()}, null]
-        const response = await this.query ({json: query, binaryTags: [26, WAFlag.ignore], expect200: true})
-        
-        if (response[1]) response[1].jpegThumbnail = response[2]
-        const data = response[1] as WAUrlInfo
-
-        const content = {text} as WATextMessage
-        content.canonicalUrl = data['canonical-url']
-        content.matchedText = data['matched-text']
-        content.jpegThumbnail = data.jpegThumbnail
-        content.description = data.description
-        content.title = data.title
-        content.previewType = 0
-        return content
-    }
     /**
      * Search WhatsApp messages with a given text string
      * @param txt the search string
-     * @param inJid the ID of the chat to search in, set to null to search all chats 
+     * @param inJid the ID of the chat to search in, set to null to search all chats
      * @param count number of results to return
      * @param page page number of results (starts from 1)
      */
     async searchMessages(txt: string, inJid: string | null, count: number, page: number) {
         const json = [
             'query',
-            { 
-                epoch: this.msgCount.toString(), 
+            {
+                epoch: this.msgCount.toString(),
                 type: 'search',
                 search: txt,
                 count: count.toString(),
@@ -269,6 +232,7 @@ export class WAConnection extends Base {
      * Delete a message in a chat for yourself
      * @param messageKey key of the message you want to delete
      */
+    @Mutex (m => m.remoteJid)
     async clearMessage (messageKey: WAMessageKey) {
         const tag = Math.round(Math.random ()*1000000)
         const attrs: WANode = [
@@ -278,7 +242,14 @@ export class WAConnection extends Base {
                 ['item', {owner: `${messageKey.fromMe}`, index: messageKey.id}, null]
             ]
         ]
-        return this.setQuery ([attrs])
+        const result = await this.setQuery ([attrs])
+
+        const chat = this.chats.get (whatsappID(messageKey.remoteJid))
+        if (chat) {
+            chat.messages = chat.messages.filter (m => m.key.id !== messageKey.id)
+        }
+
+        return result
     }
     /**
      * Delete a message in a chat for everyone
@@ -305,9 +276,9 @@ export class WAConnection extends Base {
     async forwardMessage(id: string, message: WAMessage, forceForward: boolean=false) {
         const content = message.message
         if (!content) throw new Error ('no content in message')
-        
+
         let key = Object.keys(content)[0]
-        
+
         let score = content[key].contextInfo?.forwardingScore || 0
         score += message.key.fromMe && !forceForward ? 0 : 1
         if (key === MessageType.text) {
@@ -318,8 +289,8 @@ export class WAConnection extends Base {
         }
         if (score > 0) content[key].contextInfo = { forwardingScore: score, isForwarded: true }
         else content[key].contextInfo = {}
-        
-        const waMessage = this.prepareMessageFromContent (id, content, {}) 
+
+        const waMessage = this.prepareMessageFromContent (id, content, {})
         await this.relayWAMessage (waMessage)
         return waMessage
     }

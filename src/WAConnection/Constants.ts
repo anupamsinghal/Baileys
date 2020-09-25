@@ -7,7 +7,6 @@ export const DEFAULT_ORIGIN = 'https://web.whatsapp.com'
 
 export const KEEP_ALIVE_INTERVAL_MS = 20*1000
 
-
 // export the WAMessage Prototypes
 export { proto as WAMessageProto }
 export type WANode = WA.Node
@@ -17,9 +16,9 @@ export type WAContactMessage = proto.ContactMessage
 export type WAMessageKey = proto.IMessageKey
 export type WATextMessage = proto.ExtendedTextMessage
 export type WAContextInfo = proto.IContextInfo
+export type WAGenericMediaMessage = proto.IVideoMessage | proto.IImageMessage | proto.IAudioMessage | proto.IDocumentMessage | proto.IStickerMessage
 export import WA_MESSAGE_STUB_TYPE = proto.WebMessageInfo.WEB_MESSAGE_INFO_STUBTYPE
 export import WA_MESSAGE_STATUS_TYPE = proto.WebMessageInfo.WEB_MESSAGE_INFO_STATUS
-
 
 export interface WALocationMessage {
     degreesLatitude: number
@@ -55,6 +54,7 @@ export interface WAQuery {
     tag?: string
     expect200?: boolean
     waitForOpen?: boolean
+    longTag?: boolean
 }
 export enum ReconnectMode {
     /** does not reconnect */
@@ -67,15 +67,23 @@ export enum ReconnectMode {
 export type WAConnectOptions = {
     /** timeout after which the connect attempt will fail, set to null for default timeout value */
     timeoutMs?: number
+    /** fails the connection if no data is received for X seconds */
+    maxIdleTimeMs?: number
     /** maximum attempts to connect */
     maxRetries?: number
     /** should the chats be waited for */
     waitForChats?: boolean
+    /** if set to true, the connect only waits for the last message of the chat */
+    waitOnlyForLastMessage?: boolean
+    /** max time for the phone to respond to a connectivity test */
+    phoneResponseTime?: number
 
     connectCooldownMs?: number
     /** agent which can be used for proxying connections */
     agent?: Agent
 }
+/** from: https://stackoverflow.com/questions/3809401/what-is-a-good-regular-expression-to-match-a-url */
+export const URL_REGEX = /[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)?/gi
 
 export type WAConnectionState = 'open' | 'connecting' | 'close'
 
@@ -160,6 +168,7 @@ export interface WAGroupModification {
 }
 
 export interface WAContact {
+    verify?: string
     /** name of the contact, the contact has set on their own on WA */
     notify?: string
     jid: string
@@ -170,6 +179,9 @@ export interface WAContact {
     index?: string
     /** short name for the contact */
     short?: string
+    // Baileys Added
+    lastKnownPresence?: Presence
+    lastSeen?: number
 }
 export interface WAUser extends WAContact {
     phone: any
@@ -258,6 +270,14 @@ export enum MessageType {
     audio = 'audioMessage',
     product = 'productMessage'
 }
+
+export const MessageTypeProto = {
+    [MessageType.image]: proto.ImageMessage,
+    [MessageType.video]: proto.VideoMessage,
+    [MessageType.audio]: proto.AudioMessage,
+    [MessageType.sticker]: proto.StickerMessage,
+    [MessageType.document]: proto.DocumentMessage,
+}
 export enum ChatModification {
     archive='archive',
     unarchive='unarchive',
@@ -285,13 +305,32 @@ export enum Mimetype {
     webp = 'image/webp',
 }
 export interface MessageOptions {
+    /** the message you want to quote */
     quoted?: WAMessage
+    /** some random context info (can show a forwarded message with this too) */
     contextInfo?: WAContextInfo
+    /** optional, if you want to manually set the timestamp of the message */
     timestamp?: Date
+    /** (for media messages) the caption to send with the media (cannot be sent with stickers though) */
     caption?: string
+    /** 
+     * For location & media messages -- has to be a base 64 encoded JPEG if you want to send a custom thumb, 
+     * or set to null if you don't want to send a thumbnail.
+     * Do not enter this field if you want to automatically generate a thumb 
+     * */
     thumbnail?: string
+    /** (for media messages) specify the type of media (optional for all media types except documents) */
     mimetype?: Mimetype | string
+    /** (for media messages) file name for the media */
     filename?: string
+    /** For audio messages, if set to true, will send as a `voice note` */
+    ptt?: boolean 
+    /** Optional agent for media uploads */
+    uploadAgent?: Agent
+    /** If set to true (default), automatically detects if you're sending a link & attaches the preview*/
+    detectLinks?: boolean
+    /** Fetches new media options for every media file */
+    forceNewMediaOptions?: boolean
 }
 export interface WABroadcastListInfo {
     status: number
@@ -329,6 +368,7 @@ export interface WAMessageStatusUpdate {
 export interface WAOpenResult {
     /** Was this connection opened via a QR scan */
     newConnection: boolean
+    user: WAUser
     updatedChats?: {
         [k: string]: Partial<WAChat>
     }
@@ -370,6 +410,7 @@ export type BaileysEvent =
     'open' | 
     'connecting' |
     'close' |
+    'intermediate-close' |
     'qr' |
     'connection-phone-change' |
     'user-presence-update' |
