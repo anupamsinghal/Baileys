@@ -28,15 +28,17 @@ const g_createGroup: boolean = config.createGroup
 
 const g_message: string = config.message
 const g_adminIds: number[] = config.adminIds
-const g_adminPhones: string[] = config.adminPhones   // TODO, remove this, read from db
+let g_adminPhones: string[] = [] // = config.adminPhones
 
 const g_simUserIds: number[] = config.simUserIds
-const g_simUserPhones: string[] = config.simUserPhones
+const g_simUserPhones: string[] = config.simUserPhones // TODO: read from db
 
 const g_groupName: string = config.groupName
 const g_cohortId: number = config.cohortId
 const g_processMax: number = config.processMax
-const g_sleepMs : number = config.sleepMs
+const g_sleepMs: number = config.sleepMs
+const g_groupSettingAdminsOnly: boolean = config.groupSettingAdminsOnly
+const g_makeAdmins: boolean = config.makeAdmins
 
 // 9999 is for test
 const g_group250Num: number = config.group250Num
@@ -72,6 +74,26 @@ async function addToGroup() {
     }
  }
 
+async function createGroup0() {
+    // read admins from database
+    const query = `select cell_num from users where id in (${g_adminIds})`
+    g_sqlConnection.query(query, function(error, results, fields) {
+        if (error) {
+            cleanupSendMessage()
+            throw error;
+        }
+        if (results.length > 0) {
+            for(var result of results) {
+                console.log("adding admin phone: ", result.cell_num)
+                g_adminPhones.push(result.cell_num)
+            }
+            createGroup()
+        } else {
+            console.log('ERROR in createGroup0: no rows found')
+            throw error;
+        }
+    });
+}
 
 async function createGroup() { //userId, cellNum) {    
     if (!g_createGroup) { 
@@ -86,12 +108,16 @@ async function createGroup() { //userId, cellNum) {
         console.log("created group")
         g_waGroupId = group.gid
 
-        await g_waConnection.groupMakeAdmin(g_waGroupId, admins)
-        // TODO: add to config
-        // only allow admins to send messages
-        await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.messageSend, true)
-        // only allow admins to modify the group's settings
-        await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.settingsChange, true)
+        if (g_makeAdmins) {
+            await g_waConnection.groupMakeAdmin(g_waGroupId, admins)
+        }
+        
+        if (g_groupSettingAdminsOnly) {
+            // only allow admins to send messages
+            await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.messageSend, true)
+            // only allow admins to modify the group's settings
+            await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.settingsChange, true)
+        }
 
         const query = "insert ignore into `groups` (name, wa_id) values (?, ?)"
         g_sqlConnection.query(query, [g_groupName, g_waGroupId], function(error, results, fields) {
@@ -399,7 +425,7 @@ async function connectToWhatsApp() {
     beginTransaction()
     
     // create or reuse group
-    createGroup()
+    createGroup0()
 
     // pick users
     let users: string[] = []
