@@ -87,10 +87,11 @@ async function createGroup() { //userId, cellNum) {
         g_waGroupId = group.gid
 
         await g_waConnection.groupMakeAdmin(g_waGroupId, admins)
+        // TODO: add to config
         // only allow admins to send messages
-        // await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.messageSend, true)
+        await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.messageSend, true)
         // only allow admins to modify the group's settings
-        // await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.settingsChange, true)
+        await g_waConnection.groupSettingChange(g_waGroupId, GroupSettingChange.settingsChange, true)
 
         const query = "insert ignore into `groups` (name, wa_id) values (?, ?)"
         g_sqlConnection.query(query, [g_groupName, g_waGroupId], function(error, results, fields) {
