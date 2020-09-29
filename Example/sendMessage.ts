@@ -27,8 +27,7 @@ const g_simulation: boolean = config.simulation
 const g_createGroup: boolean = config.createGroup
 
 const g_message: string = config.message
-const g_adminIds: number[] = config.adminIds
-let g_adminPhones: string[] = [] // = config.adminPhones
+const g_adminPhones: string[] = config.adminPhones
 
 const g_simUserIds: number[] = config.simUserIds
 const g_simUserPhones: string[] = config.simUserPhones // TODO: read from db
@@ -74,27 +73,6 @@ async function addToGroup() {
     }
  }
 
-async function createGroup0() {
-    // read admins from database
-    const query = `select cell_num from users where id in (${g_adminIds})`
-    g_sqlConnection.query(query, function(error, results, fields) {
-        if (error) {
-            cleanupSendMessage()
-            throw error;
-        }
-        if (results.length > 0) {
-            for(var result of results) {
-                console.log("adding admin phone: ", result.cell_num)
-                g_adminPhones.push(result.cell_num)
-            }
-            createGroup()
-        } else {
-            console.log('ERROR in createGroup0: no rows found')
-            throw error;
-        }
-    });
-}
-
 async function createGroup() { //userId, cellNum) {    
     if (!g_createGroup) { 
         return
@@ -104,11 +82,11 @@ async function createGroup() { //userId, cellNum) {
         console.log("creating group")
         let admins = g_adminPhones
         admins = admins.map(admin => convertPhoneToWAUserId(admin))
-        let group = await g_waConnection.groupCreate(g_groupName, admins)
+        let group = await g_waConnection.groupCreate(g_groupName, admins)        
         console.log("created group")
         g_waGroupId = group.gid
 
-        if (g_makeAdmins) {
+        if (g_makeAdmins && admins.length > 0) {
             await g_waConnection.groupMakeAdmin(g_waGroupId, admins)
         }
         
@@ -227,7 +205,6 @@ function sm4_addUserGroups(userId: number) {
     //console.log('in sm4_addUserGroups: ', waGroupId, groupId)
 
     let query = `insert ignore into user_group (user_id, group_id) values (${userId}, ${g_groupId})`
-    //g_adminIds.forEach(adminId => query += `, (${adminId}, ${g_groupId})`)
     //console.log(query)
     g_sqlConnection.query(query, function(error, results, fields) {
         if (error) {
@@ -425,7 +402,7 @@ async function connectToWhatsApp() {
     beginTransaction()
     
     // create or reuse group
-    createGroup0()
+    createGroup()
 
     // pick users
     let users: string[] = []
